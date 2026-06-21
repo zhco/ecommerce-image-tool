@@ -39,6 +39,7 @@ class _ImageMattingPageState extends State<ImageMattingPage> {
   final ImagePicker _picker = ImagePicker();
 
   bool _isInitialized = false;
+  bool _initFailed = false;
   bool _isProcessing = false;
 
   // 模式切换：single / batch
@@ -244,21 +245,39 @@ class _ImageMattingPageState extends State<ImageMattingPage> {
   }
 
   Widget _buildStatusCard() {
+    final icon = _isInitialized
+        ? Icons.check_circle
+        : _initFailed
+            ? Icons.error
+            : Icons.pending;
+    final color = _isInitialized
+        ? Colors.green
+        : _initFailed
+            ? Colors.red
+            : Colors.orange;
+    final text = _isInitialized
+        ? 'AI模型就绪 (U2-Net)'
+        : _initFailed
+            ? '模型加载失败，请重试'
+            : '模型加载中...';
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
         child: Row(
           children: [
-            Icon(
-              _isInitialized ? Icons.check_circle : Icons.pending,
-              color: _isInitialized ? Colors.green : Colors.orange,
-              size: 20,
-            ),
+            Icon(icon, color: color, size: 20),
             const SizedBox(width: 8),
-            Text(
-              _isInitialized ? 'AI模型就绪 (U2-Net)' : '模型加载中...',
-              style: const TextStyle(fontSize: 14),
-            ),
+            Text(text, style: const TextStyle(fontSize: 14)),
+            if (_initFailed) ...[
+              const Spacer(),
+              TextButton(
+                onPressed: () {
+                  setState(() => _initFailed = false);
+                  _initializeModel();
+                },
+                child: const Text('重试'),
+              ),
+            ],
           ],
         ),
       ),
