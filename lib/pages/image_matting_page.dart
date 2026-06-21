@@ -61,7 +61,7 @@ class _ImageMattingPageState extends State<ImageMattingPage> {
   @override
   void initState() {
     super.initState();
-    _initializeModel();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initializeModel());
   }
 
   Future<void> _initializeModel() async {
