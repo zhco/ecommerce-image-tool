@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:image/image.dart' as img;
 import '../services/u2net_service.dart';
 
 class CheckerboardPainter extends CustomPainter {
