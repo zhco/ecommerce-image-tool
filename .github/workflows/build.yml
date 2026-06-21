@@ -10,25 +10,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-
       - name: Install dependencies
         run: flutter pub get
-
       - name: Build APK (split per ABI)
         run: flutter build apk --release --split-per-abi
-
-      - name: Upload arm64-v8a APK
+      - name: Upload arm64-v8a
         uses: actions/upload-artifact@v4
         with:
           name: app-arm64-v8a
           path: build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-
-      - name: Upload armeabi-v7a APK
+      - name: Upload armeabi-v7a
         uses: actions/upload-artifact@v4
         with:
           name: app-armeabi-v7a
           path: build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: "*.apk"
+          tag: v1.0.3
+          name: "v1.0.3 - ONNX 1.8.0"
+          body: "flutter_onnxruntime 1.8.0, remove extractNativeLibs"
+          allowUpdates: true
+          removeArtifacts: true
