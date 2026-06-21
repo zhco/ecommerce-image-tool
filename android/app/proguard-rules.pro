@@ -2,5 +2,8 @@
 -keep class ai.onnxruntime.** { *; }
 -dontwarn ai.onnxruntime.**
 
+# Google Play Core - Flutter deferred components
+-dontwarn com.google.android.play.core.**
+
 # Flutter
 -keep class io.flutter.** { *; }
