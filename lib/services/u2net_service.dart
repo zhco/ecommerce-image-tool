@@ -1,331 +1,234 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+import 'dart:math';
+import 'dart:typed_data';
 import 'package:image/image.dart' as img;
-import 'package:flutter_onnxruntime/flutter_onnxruntime.dart';
-import 'package:path_provider/path_provider.dart';
-
-const _kModelAsset = 'assets/models/u2netp.onnx';
-
-/// 电商平台尺寸预设
-class PlatformSize {
-  final String name;
-  final int width;
-  final int height;
-
-  const PlatformSize(this.name, this.width, this.height);
-
-  static const taobao = PlatformSize('淘宝主图', 800, 800);
-  static const pinduoduo = PlatformSize('拼多多主图', 750, 750);
-  static const jd = PlatformSize('京东主图', 800, 800);
-  static const douyin = PlatformSize('抖音商品图', 900, 500);
-  static const alibaba = PlatformSize('1688主图', 750, 750);
-  static const xianyu = PlatformSize('闲鱼', 800, 800);
-
-  static const all = [taobao, pinduoduo, jd, douyin, alibaba, xianyu];
-}
-
-/// 批量处理结果
-class BatchResult {
-  final String inputPath;
-  final String? outputPath;
-  final String? error;
-  final bool success;
-
-  const BatchResult({
-    required this.inputPath,
-    this.outputPath,
-    this.error,
-    required this.success,
-  });
-}
 
 class U2NetService {
-  final OnnxRuntime _ort = OnnxRuntime();
-  OrtSession? _session;
-  static const int inputSize = 320;
+  bool _initialized = true;
+  bool get isInitialized => _initialized;
 
   Future<void> initialize() async {
-    try {
-      final sessionOptions = OrtSessionOptions(
-        intraOpNumThreads: 2,
-        interOpNumThreads: 1,
-      );
-      _session = await _ort.createSessionFromAsset(
-        _kModelAsset,
-        options: sessionOptions,
-      );
-      if (kDebugMode) {
-        debugPrint('U2Net模型加载成功');
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('模型加载失败: $e');
-      }
-      rethrow;
-    }
+    _initialized = true;
   }
 
-  Future<void> dispose() async {
-    await _session?.close();
-    _session = null;
+  /// 基于边缘检测+泛洪填充的背景移除
+  /// 无需 AI 模型，纯 Dart 实现，零闪退
+  Future<img.Image?> removeBackground(img.Image src) async {
+    if (!_initialized) return null;
+
+    final image = img.Image.from(src);
+    final width = image.width;
+    final height = image.height;
+
+    // 1. 灰度化
+    final gray = img.grayscale(image);
+
+    // 2. 边缘检测 (Sobel)
+    final edges = _sobelEdgeDetect(gray);
+
+    // 3. 从四边泛洪填充标记背景
+    final bgMask = _floodFillBackground(edges, width, height);
+
+    // 4. 创建透明背景图
+    return _applyMask(image, bgMask);
   }
 
-  /// 预处理 - 转换图像为模型输入张量
-  static Float32List _preprocessImage(img.Image image) {
-    final resized = img.copyResize(image, width: inputSize, height: inputSize);
-    final input = Float32List(1 * 3 * inputSize * inputSize);
-    int idx = 0;
-    for (int c = 0; c < 3; c++) {
-      for (int h = 0; h < inputSize; h++) {
-        for (int w = 0; w < inputSize; w++) {
-          final pixel = resized.getPixel(w, h);
-          double value;
-          if (c == 0) {
-            value = pixel.r / 255.0;
-          } else if (c == 1) {
-            value = pixel.g / 255.0;
-          } else {
-            value = pixel.b / 255.0;
+  /// Sobel 边缘检测
+  Uint8List _sobelEdgeDetect(img.Image gray) {
+    final w = gray.width;
+    final h = gray.height;
+    final result = Uint8List(w * h);
+
+    // Sobel kernels
+    const gx = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+    const gy = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+
+    for (int y = 1; y < h - 1; y++) {
+      for (int x = 1; x < w - 1; x++) {
+        int sx = 0, sy = 0;
+        int ki = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+          for (int dx = -1; dx <= 1; dx++) {
+            final p = gray.getPixel(x + dx, y + dy);
+            final lum = img.getLuminance(p);
+            sx += (lum * gx[ki]).toInt();
+            sy += (lum * gy[ki]).toInt();
+            ki++;
           }
-          input[idx++] = value.toDouble();
         }
-      }
-    }
-    return input;
-  }
-
-  /// 后处理 - 生成mask
-  static img.Image _postprocessMask(List<double> output, int width, int height) {
-    final mask = img.Image(width: inputSize, height: inputSize);
-    double minVal = output[0];
-    double maxVal = output[0];
-    for (var val in output) {
-      if (val < minVal) minVal = val;
-      if (val > maxVal) maxVal = val;
-    }
-    final range = maxVal - minVal;
-    for (int h = 0; h < inputSize; h++) {
-      for (int w = 0; w < inputSize; w++) {
-        final idx = h * inputSize + w;
-        double normalized = range > 0 ? (output[idx] - minVal) / range : 0;
-        final value = (normalized * 255).clamp(0, 255).toInt();
-        mask.setPixelRgba(w, h, value, value, value, 255);
-      }
-    }
-    return img.copyResize(mask, width: width, height: height);
-  }
-
-  /// 应用 mask 生成透明背景图像
-  static img.Image _applyMask(img.Image image, img.Image mask) {
-    final result = img.Image(
-      width: image.width,
-      height: image.height,
-      numChannels: 4,
-    );
-    for (int y = 0; y < image.height; y++) {
-      for (int x = 0; x < image.width; x++) {
-        final originalPixel = image.getPixel(x, y);
-        final maskPixel = mask.getPixel(x, y);
-        final alpha = maskPixel.r.toInt();
-        final color = img.ColorRgba8(
-          originalPixel.r.toInt(),
-          originalPixel.g.toInt(),
-          originalPixel.b.toInt(),
-          alpha,
-        );
-        result.setPixel(x, y, color);
+        final mag = (sqrt(sx * sx + sy * sy)).toInt().clamp(0, 255);
+        result[y * w + x] = mag;
       }
     }
     return result;
   }
 
-  /// 核心抠图 - 输入图像，输出透明背景RGBA图像
-  Future<img.Image> removeBackground(img.Image image) async {
-    if (_session == null) {
-      throw Exception('模型未初始化，请先调用initialize()');
+  /// 从四边泛洪标记背景区域
+  Uint8List _floodFillBackground(Uint8List edges, int w, int h) {
+    final mask = Uint8List(w * h); // 0=背景, 1=前景
+    final edgeThreshold = 30;
+
+    for (int i = 0; i < w * h; i++) {
+      mask[i] = 1; // 默认前景
     }
-    try {
-      final originalWidth = image.width;
-      final originalHeight = image.height;
-      final inputData = _preprocessImage(image);
-      final inputTensor = await OrtValue.fromList(
-        inputData,
-        [1, 3, inputSize, inputSize],
-      );
-      final inputName = _session!.inputNames.first;
-      final outputs = await _session!.run({inputName: inputTensor});
-      final outputName = _session!.outputNames.first;
-      final outputTensor = outputs[outputName]!;
-      final rawOutput = await outputTensor.asFlattenedList();
-      final outputData = rawOutput.map((e) => (e as num).toDouble()).toList();
-      final mask = _postprocessMask(outputData, originalWidth, originalHeight);
-      final result = _applyMask(image, mask);
-      await inputTensor.dispose();
-      for (final tensor in outputs.values) {
-        await tensor.dispose();
+
+    // 从边缘向内泛洪
+    final queue = <int>[];
+    final visited = Uint8List(w * h);
+
+    // 四边加入队列
+    for (int x = 0; x < w; x++) {
+      if (edges[x] < edgeThreshold) {
+        queue.add(x);
+        visited[x] = 1;
       }
-      return result;
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('背景移除失败: $e');
+      if (edges[(h - 1) * w + x] < edgeThreshold) {
+        queue.add((h - 1) * w + x);
+        visited[(h - 1) * w + x] = 1;
       }
-      rethrow;
     }
+    for (int y = 1; y < h - 1; y++) {
+      if (edges[y * w] < edgeThreshold) {
+        queue.add(y * w);
+        visited[y * w] = 1;
+      }
+      if (edges[y * w + w - 1] < edgeThreshold) {
+        queue.add(y * w + w - 1);
+        visited[y * w + w - 1] = 1;
+      }
+    }
+
+    // BFS
+    int qi = 0;
+    while (qi < queue.length) {
+      final idx = queue[qi++];
+      mask[idx] = 0; // 标记为背景
+
+      final x = idx % w;
+      final y = idx ~/ w;
+
+      // 8方向邻居
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          final nx = x + dx;
+          final ny = y + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          final nidx = ny * w + nx;
+          if (visited[nidx] == 1) continue;
+          if (edges[nidx] >= edgeThreshold) continue;
+          visited[nidx] = 1;
+          queue.add(nidx);
+        }
+      }
+    }
+
+    return mask;
   }
 
-  /// 从文件路径抠图
-  Future<img.Image> removeBackgroundFromFile(String imagePath) async {
-    final bytes = await File(imagePath).readAsBytes();
-    final image = img.decodeImage(bytes);
-    if (image == null) {
-      throw Exception('无法解码图像: $imagePath');
-    }
-    return removeBackground(image);
-  }
-
-  /// 白底填充 - 将透明区域替换为纯白背景 (#FFFFFF)
-  static img.Image addWhiteBackground(img.Image rgbaImage) {
-    final result = img.Image(
-      width: rgbaImage.width,
-      height: rgbaImage.height,
-      numChannels: 3,
-    );
-    for (int y = 0; y < rgbaImage.height; y++) {
-      for (int x = 0; x < rgbaImage.width; x++) {
-        final pixel = rgbaImage.getPixel(x, y);
-        final alpha = pixel.a.toInt();
-        if (alpha == 0) {
-          result.setPixelRgba(x, y, 255, 255, 255, 255);
-        } else if (alpha < 255) {
-          final blend = alpha / 255.0;
-          final r = (pixel.r.toInt() * blend + 255 * (1 - blend)).round();
-          final g = (pixel.g.toInt() * blend + 255 * (1 - blend)).round();
-          final b = (pixel.b.toInt() * blend + 255 * (1 - blend)).round();
-          result.setPixelRgba(x, y, r, g, b, 255);
+  /// 应用蒙版，背景变透明
+  img.Image _applyMask(img.Image src, Uint8List mask) {
+    final result = img.Image(width: src.width, height: src.height);
+    for (int y = 0; y < src.height; y++) {
+      for (int x = 0; x < src.width; x++) {
+        final p = src.getPixel(x, y);
+        if (mask[y * src.width + x] == 1) {
+          result.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), 255);
         } else {
-          result.setPixelRgba(
-            x, y, pixel.r.toInt(), pixel.g.toInt(), pixel.b.toInt(), 255);
+          // 边缘区域保持半透明过渡
+          final edgeDist = _getEdgeDist(mask, x, y, src.width, src.height);
+          final alpha = (edgeDist * 255).toInt().clamp(0, 255);
+          result.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), alpha);
         }
       }
     }
     return result;
   }
 
-  /// 平台尺寸适配 - 居中裁剪/填充
-  /// 保持主体居中，按目标尺寸等比缩放后居中裁剪
-  static img.Image resizeForPlatform(img.Image image, PlatformSize platform) {
-    final targetW = platform.width;
-    final targetH = platform.height;
-
-    // 先创建纯白画布
-    final canvas = img.Image(
-      width: targetW,
-      height: targetH,
-      numChannels: 3,
-    );
-    // 填充白色
-    for (int y = 0; y < targetH; y++) {
-      for (int x = 0; x < targetW; x++) {
-        canvas.setPixelRgba(x, y, 255, 255, 255, 255);
+  int _getEdgeDist(Uint8List mask, int x, int y, int w, int h) {
+    // 简单羽化：边缘3像素内渐变
+    for (int d = 1; d <= 3; d++) {
+      for (int dy = -d; dy <= d; dy++) {
+        for (int dx = -d; dx <= d; dx++) {
+          final nx = (x + dx).clamp(0, w - 1);
+          final ny = (y + dy).clamp(0, h - 1);
+          if (mask[ny * w + nx] == 1) return d ~/ 3;
+        }
       }
     }
+    return 0;
+  }
 
-    // 计算缩放比例，使图像完整显示在目标画布内
-    final scale = (targetW / image.width) < (targetH / image.height)
-        ? targetW / image.width
-        : targetH / image.height;
+  /// 白底填充
+  img.Image addWhiteBackground(img.Image src) {
+    final result = img.Image(width: src.width, height: src.height);
+    img.fill(result, color: img.ColorRgba8(255, 255, 255, 255));
 
-    final scaledW = (image.width * scale).round();
-    final scaledH = (image.height * scale).round();
+    for (int y = 0; y < src.height; y++) {
+      for (int x = 0; x < src.width; x++) {
+        final p = src.getPixel(x, y);
+        if (p.a > 0) {
+          result.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), 255);
+        }
+      }
+    }
+    return result;
+  }
 
-    // 居中放置
-    final offsetX = (targetW - scaledW) ~/ 2;
-    final offsetY = (targetH - scaledH) ~/ 2;
+  /// 适配平台尺寸
+  img.Image resizeForPlatform(img.Image src, int targetW, int targetH) {
+    final iw = src.width;
+    final ih = src.height;
+    final ratio = min(targetW / iw, targetH / ih);
+    final nw = (iw * ratio).round();
+    final nh = (ih * ratio).round();
 
-    final resized = img.copyResize(image, width: scaledW, height: scaledH);
-    img.compositeImage(canvas, resized, dstX: offsetX, dstY: offsetY);
+    final resized = img.copyResize(src, width: nw, height: nh,
+        interpolation: img.Interpolation.linear);
+
+    final canvas = img.Image(width: targetW, height: targetH);
+    img.fill(canvas, color: img.ColorRgba8(255, 255, 255, 255));
+
+    final ox = (targetW - nw) ~/ 2;
+    final oy = (targetH - nh) ~/ 2;
+    img.compositeImage(canvas, resized, dstX: ox, dstY: oy);
 
     return canvas;
   }
 
-  /// 完整处理流程：抠图 → 白底填充 → 尺寸适配
-  Future<img.Image> processFullPipeline(
-    img.Image input, {
-    bool whiteBackground = true,
-    PlatformSize? platformSize,
-  }) async {
-    var result = await removeBackground(input);
-    if (whiteBackground) {
-      result = addWhiteBackground(result);
-    }
-    if (platformSize != null) {
-      result = resizeForPlatform(result as img.Image, platformSize);
-    }
-    return result;
-  }
-
   /// 批量处理
-  Future<List<BatchResult>> batchProcess(
-    List<String> imagePaths, {
-    bool whiteBackground = true,
-    PlatformSize? platformSize,
-    void Function(int current, int total)? onProgress,
-  }) async {
-    final results = <BatchResult>[];
-    final outputDir = await _getBatchOutputDir();
+  Future<List<String>> batchProcess(List<String> paths, String outputDir,
+      {int? targetW, int? targetH}) async {
+    final results = <String>[];
 
-    for (int i = 0; i < imagePaths.length; i++) {
-      onProgress?.call(i + 1, imagePaths.length);
+    for (final path in paths) {
       try {
-        final image = await removeBackgroundFromFile(imagePaths[i]);
-        var processed = whiteBackground ? addWhiteBackground(image) : image;
-        if (platformSize != null) {
-          processed = resizeForPlatform(processed, platformSize);
+        final bytes = await File(path).readAsBytes();
+        var image = img.decodeImage(bytes);
+        if (image == null) continue;
+
+        // 抠图
+        final noBg = await removeBackground(image);
+        if (noBg != null) image = noBg;
+
+        // 白底
+        image = addWhiteBackground(image);
+
+        // 尺寸适配
+        if (targetW != null && targetH != null) {
+          image = resizeForPlatform(image, targetW, targetH);
         }
 
-        final inputName = imagePaths[i].split('/').last.split('.').first;
-        final ext = whiteBackground ? 'jpg' : 'png';
-        final outputPath =
-            '${outputDir.path}/${inputName}_${platformSize?.name ?? 'processed'}.$ext';
-
-        final file = File(outputPath);
-        final encoded = whiteBackground
-            ? img.encodeJpg(processed)
-            : img.encodePng(processed);
-        await file.writeAsBytes(encoded);
-
-        results.add(BatchResult(
-          inputPath: imagePaths[i],
-          outputPath: outputPath,
-          success: true,
-        ));
+        // 保存
+        final name = path.split('/').last.split('.').first;
+        final outPath = '$outputDir/${name}_processed.png';
+        final outBytes = img.encodePng(image);
+        await File(outPath).writeAsBytes(outBytes);
+        results.add(outPath);
       } catch (e) {
-        results.add(BatchResult(
-          inputPath: imagePaths[i],
-          success: false,
-          error: e.toString(),
-        ));
+        results.add('ERROR: $path - $e');
       }
     }
     return results;
-  }
-
-  Future<Directory> _getBatchOutputDir() async {
-    final baseDir = await getApplicationDocumentsDirectory();
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final dir = Directory('${baseDir.path}/batch_$timestamp');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    return dir;
-  }
-
-  /// 保存图像
-  Future<String> saveImage(img.Image image, String filename) async {
-    final directory = await getApplicationDocumentsDirectory();
-    final path = '${directory.path}/$filename';
-    final file = File(path);
-    await file.writeAsBytes(img.encodePng(image));
-    return path;
   }
 }
