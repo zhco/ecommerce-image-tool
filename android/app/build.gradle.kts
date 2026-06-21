@@ -20,7 +20,7 @@ android {
 
     defaultConfig {
         applicationId = "com.zhco.ecommerce_image_tool"
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
